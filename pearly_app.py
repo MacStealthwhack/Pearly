@@ -5,7 +5,6 @@ Hardware: Pi Zero W, 1602A LCD (4-bit GPIO), reed switch, limit switch
 """
 
 import time
-import math
 import sqlite3
 import signal
 import sys
@@ -21,7 +20,7 @@ LCD_D6 = 18
 LCD_D7 = 22
 
 PIN_REED  = 12   # Reed switch: lid sensor (LOW = closed)
-PIN_LIMIT = 16   # Limit switch: phone present (LOW = pressed)
+PIN_LIMIT = 16   # Limit switch: phone present (HIGH = pressed)
 
 # ── LCD Constants ──────────────────────────────────────────────────────────
 LCD_WIDTH = 16
@@ -29,13 +28,26 @@ LCD_CHR   = True
 LCD_CMD   = False
 LCD_LINE1 = 0x80
 LCD_LINE2 = 0xC0
-E_PULSE   = 0.001
-E_DELAY   = 0.001
+E_PULSE   = 0.0005
+E_DELAY   = 0.0005
 
-# ── Pearl Rate Parameters ──────────────────────────────────────────────────
-RATE_START      = 1.0   # pearls/min at session start
-RATE_END        = 2.0   # pearls/min at RAMP_DURATION
-RAMP_DURATION   = 30.0  # minutes over which rate ramps up
+# ── Custom Character Slots ─────────────────────────────────────────────────
+CHAR_PEARL = 0   # Pearl icon slot
+
+# ── Pearl Rate Milestones ──────────────────────────────────────────────────
+# (minimum elapsed minutes, rate in pearls/min)
+MILESTONES = [
+    (0,   5),
+    (15,  8),
+    (30, 10),
+]
+
+MILESTONE_MESSAGES = [
+    (15, "15 min! Rate up!"),
+    (30, "30 min! Max rate!"),
+    (60, "1 hour! Amazing!"),
+    (120,"2 hours! Wow!   "),
+]
 
 # ── Database ───────────────────────────────────────────────────────────────
 DB_PATH = "/home/admin/pearly.db"
@@ -51,26 +63,24 @@ def lcd_init():
         GPIO.setup(pin, GPIO.OUT)
         GPIO.output(pin, False)
 
-    # Initialization sequence per HD44780 datasheet
     time.sleep(0.05)
     lcd_byte(0x33, LCD_CMD)
     lcd_byte(0x32, LCD_CMD)
     lcd_byte(0x28, LCD_CMD)  # 4-bit, 2 line, 5x8 dots
     lcd_byte(0x0C, LCD_CMD)  # display on, cursor off
-    lcd_byte(0x06, LCD_CMD)  # entry mode: increment, no shift
-    lcd_byte(0x01, LCD_CMD)  # clear display
+    lcd_byte(0x06, LCD_CMD)  # entry mode
+    lcd_byte(0x01, LCD_CMD)  # clear
     time.sleep(0.005)
+    lcd_create_chars()
 
 
 def lcd_byte(bits, mode):
     GPIO.output(LCD_RS, mode)
-    # High nibble
     GPIO.output(LCD_D4, bool(bits & 0x10))
     GPIO.output(LCD_D5, bool(bits & 0x20))
     GPIO.output(LCD_D6, bool(bits & 0x40))
     GPIO.output(LCD_D7, bool(bits & 0x80))
     lcd_toggle_enable()
-    # Low nibble
     GPIO.output(LCD_D4, bool(bits & 0x01))
     GPIO.output(LCD_D5, bool(bits & 0x02))
     GPIO.output(LCD_D6, bool(bits & 0x04))
@@ -86,13 +96,84 @@ def lcd_toggle_enable():
     time.sleep(E_DELAY)
 
 
-def lcd_write(line1: str, line2: str = ""):
+def lcd_create_chars():
+    # Pearl icon: small sphere with shine arc in top-left
+    # Each row is a 5-bit pattern (bits 4-0 = columns left-right)
+    pearl = [
+        0b00110,   # ..XX.   shine arc
+        0b01001,   # .X..X
+        0b01110,   # .XXX.   top of sphere
+        0b11111,   # XXXXX
+        0b11111,   # XXXXX
+        0b11111,   # XXXXX
+        0b01110,   # .XXX.   bottom
+        0b00000,   # .....
+    ]
+    # Write to CGRAM slot 0
+    lcd_byte(0x40 | (CHAR_PEARL << 3), LCD_CMD)
+    for row in pearl:
+        lcd_byte(row, LCD_CHR)
+    # Return to DDRAM
     lcd_byte(LCD_LINE1, LCD_CMD)
-    for c in line1.ljust(LCD_WIDTH)[:LCD_WIDTH]:
-        lcd_byte(ord(c), LCD_CHR)
+
+
+def lcd_write(line1: str, line2: str = ""):
+    """Write two lines. Use \x00 for pearl icon character."""
+    lcd_byte(LCD_LINE1, LCD_CMD)
+    _lcd_write_line(line1)
     lcd_byte(LCD_LINE2, LCD_CMD)
-    for c in line2.ljust(LCD_WIDTH)[:LCD_WIDTH]:
-        lcd_byte(ord(c), LCD_CHR)
+    _lcd_write_line(line2)
+
+
+def _lcd_write_line(text: str):
+    text = text.ljust(LCD_WIDTH)[:LCD_WIDTH]
+    for c in text:
+        if c == '\x00':
+            lcd_byte(CHAR_PEARL, LCD_CHR)
+        else:
+            lcd_byte(ord(c), LCD_CHR)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Splash Screen
+# ══════════════════════════════════════════════════════════════════════════
+
+def lcd_splash():
+    """Animate 'Welcome to' sliding in from left, 'Pearly' from right."""
+    top    = "Welcome to"
+    bottom = "Pearly"
+
+    # Slide top line in from left, bottom from right simultaneously
+    steps = LCD_WIDTH + max(len(top), len(bottom))
+    for i in range(1, steps + 1):
+        # Top: slides in from left
+        top_pos = i - len(top)
+        if top_pos < 0:
+            top_slice = top[abs(top_pos):]
+            line1 = top_slice.ljust(LCD_WIDTH)
+        else:
+            line1 = (" " * top_pos + top).ljust(LCD_WIDTH)
+
+        # Bottom: slides in from right
+        right_offset = LCD_WIDTH - i
+        if right_offset > 0:
+            line2 = (" " * right_offset + bottom)[:LCD_WIDTH]
+        else:
+            line2 = (bottom[abs(right_offset):]).ljust(LCD_WIDTH)
+
+        lcd_write(line1[:LCD_WIDTH], line2[:LCD_WIDTH])
+        time.sleep(0.05)
+
+        # Stop sliding once both are fully visible and centered
+        if i >= LCD_WIDTH:
+            break
+
+    # Hold final centered display
+    lcd_write(
+        top.center(LCD_WIDTH),
+        bottom.center(LCD_WIDTH)
+    )
+    time.sleep(2.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -133,24 +214,24 @@ def db_init(conn: sqlite3.Connection):
             started_at  TEXT NOT NULL,
             ended_at    TEXT,
             duration_s  REAL,
-            pearls      REAL
+            pearls      INTEGER
         );
         CREATE TABLE IF NOT EXISTS totals (
             id          INTEGER PRIMARY KEY CHECK (id = 1),
-            pearls      REAL NOT NULL DEFAULT 0
+            pearls      INTEGER NOT NULL DEFAULT 0
         );
         INSERT OR IGNORE INTO totals (id, pearls) VALUES (1, 0);
     """)
     conn.commit()
 
 
-def db_get_total(conn: sqlite3.Connection) -> float:
+def db_get_total(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT pearls FROM totals WHERE id = 1").fetchone()
-    return row["pearls"] if row else 0.0
+    return row["pearls"] if row else 0
 
 
 def db_save_session(conn: sqlite3.Connection, started_at: datetime,
-                    duration_s: float, pearls: float):
+                    duration_s: float, pearls: int):
     ended_at = datetime.now()
     conn.execute(
         "INSERT INTO sessions (started_at, ended_at, duration_s, pearls) "
@@ -165,36 +246,45 @@ def db_save_session(conn: sqlite3.Connection, started_at: datetime,
 # Pearl Rate Calculation
 # ══════════════════════════════════════════════════════════════════════════
 
-def pearls_for_duration(duration_s: float) -> float:
+def current_rate(elapsed_s: float) -> int:
+    """Return current pearls/min based on milestone thresholds."""
+    elapsed_min = elapsed_s / 60.0
+    rate = MILESTONES[0][1]
+    for min_elapsed, milestone_rate in MILESTONES:
+        if elapsed_min >= min_elapsed:
+            rate = milestone_rate
+    return rate
+
+
+def pearls_for_duration(duration_s: float) -> int:
     """
-    Linear ramp from RATE_START to RATE_END over RAMP_DURATION minutes.
-    Integrates the rate curve over time to get total pearls.
-
-    rate(t) = RATE_START + (RATE_END - RATE_START) * min(t, RAMP_DURATION) / RAMP_DURATION
-    where t is in minutes.
-
-    Split into ramp phase and flat phase:
-      ramp  = integral from 0 to min(t, D) of (a + (b-a)*t/D) dt
-      flat  = (b) * max(t - D, 0)
+    Compute total pearls earned by integrating milestone-based rates.
+    Returns a whole number.
     """
-    t = duration_s / 60.0
-    a = RATE_START
-    b = RATE_END
-    D = RAMP_DURATION
+    total = 0.0
+    duration_min = duration_s / 60.0
 
-    t_ramp = min(t, D)
-    t_flat = max(t - D, 0.0)
+    # Build milestone breakpoints in minutes
+    breakpoints = [(m, r) for m, r in MILESTONES]
 
-    ramp_pearls = a * t_ramp + (b - a) * (t_ramp ** 2) / (2 * D)
-    flat_pearls = b * t_flat
+    for i, (start_min, rate) in enumerate(breakpoints):
+        end_min = breakpoints[i + 1][0] if i + 1 < len(breakpoints) else duration_min
+        end_min = min(end_min, duration_min)
+        if start_min >= duration_min:
+            break
+        segment = end_min - start_min
+        total += segment * rate
 
-    return ramp_pearls + flat_pearls
+    return int(total)
 
 
-def current_rate(duration_s: float) -> float:
-    """Instantaneous pearls/min at this point in the session."""
-    t = min(duration_s / 60.0, RAMP_DURATION)
-    return RATE_START + (RATE_END - RATE_START) * t / RAMP_DURATION
+def next_milestone_min(elapsed_s: float):
+    """Return the next milestone in minutes, or None if past all milestones."""
+    elapsed_min = elapsed_s / 60.0
+    for min_elapsed, _ in MILESTONES:
+        if elapsed_min < min_elapsed:
+            return min_elapsed
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -206,29 +296,48 @@ def fmt_duration(seconds: float) -> str:
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
     if h:
-        return f"{h}h{m:02d}m{sec:02d}s"
+        return f"{h}h{m:02d}m"
     return f"{m:02d}m{sec:02d}s"
 
 
-def display_idle(total_pearls: float):
+def display_idle(total: int):
+    # Line 1: "Pearly is ready"
+    # Line 2: total pearls with icon
     lcd_write(
-        "Pearly is waiting",
-        f"Total:{total_pearls:>7.1f}p"
+        "Pearly is ready ",
+        f"Total: {total}\x00"
     )
 
 
-def display_session(elapsed_s: float, session_pearls: float, total_pearls: float):
-    # Line 1: elapsed time + session pearls
-    # Line 2: total pearls
-    line1 = f"{fmt_duration(elapsed_s)} +{session_pearls:.1f}p"
-    line2 = f"Total:{total_pearls:>7.1f}p"
+def display_session(elapsed_s: float, session_pearls: int, total: int):
+    # Line 1: elapsed time + session pearls with icon
+    # Line 2: rate with icon + next milestone countdown
+    rate = current_rate(elapsed_s)
+    next_ms = next_milestone_min(elapsed_s)
+
+    time_str = fmt_duration(elapsed_s)
+    line1 = f"{time_str} +{session_pearls}\x00"
+
+    if next_ms is not None:
+        remaining = int(next_ms - elapsed_s / 60.0) + 1
+        line2 = f"Rate:{rate}\x00/m +{remaining}m"
+    else:
+        line2 = f"Rate:{rate}\x00/m MAX!"
+
     lcd_write(line1, line2)
 
 
-def display_summary(session_pearls: float, total_pearls: float):
+def display_milestone(message: str, session_pearls: int):
     lcd_write(
-        f"  +{session_pearls:.1f} pearls!  ",
-        f"Total:{total_pearls:>7.1f}p"
+        message,
+        f"+{session_pearls}\x00 this session"
+    )
+
+
+def display_summary(session_pearls: int, total: int):
+    lcd_write(
+        f"+{session_pearls} \x00 earned! ",
+        f"Total: {total}\x00"
     )
 
 
@@ -243,9 +352,14 @@ def main():
     lcd_init()
     switches_init()
 
-    in_session      = False
-    session_start   = None
-    last_display    = 0.0
+    lcd_splash()
+
+    in_session         = False
+    session_start      = None
+    session_start_mono = 0.0
+    last_display       = 0.0
+    last_milestone_min = -1  # track which milestones we've shown
+    milestone_show_until = 0.0  # monotonic time until which to show milestone msg
 
     print("Pearly started.")
 
@@ -255,10 +369,10 @@ def main():
             elapsed = time.monotonic() - session_start_mono
             pearls  = pearls_for_duration(elapsed)
             db_save_session(conn, session_start, elapsed, pearls)
-            print(f"Session saved: {elapsed:.0f}s, {pearls:.2f} pearls")
-        lcd_write("  Pearly offline", "  Goodbye!      ")
+            print(f"Session saved: {elapsed:.0f}s, {pearls} pearls")
+        lcd_write("  Pearly offline", "   Goodbye!     ")
         time.sleep(2)
-        lcd_byte(0x01, LCD_CMD)  # clear
+        lcd_byte(0x01, LCD_CMD)
         GPIO.cleanup()
         conn.close()
         sys.exit(0)
@@ -266,10 +380,8 @@ def main():
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    session_start_mono = 0.0  # monotonic reference for elapsed time
-
     while True:
-        active = session_active()
+        active   = session_active()
         now_mono = time.monotonic()
 
         if active and not in_session:
@@ -278,23 +390,35 @@ def main():
             session_start      = datetime.now()
             session_start_mono = now_mono
             last_display       = 0.0
+            last_milestone_min = -1
+            milestone_show_until = 0.0
             print(f"Session started at {session_start.isoformat()}")
 
         elif not active and in_session:
             # ── Session end ──
-            elapsed       = now_mono - session_start_mono
-            pearls        = pearls_for_duration(elapsed)
+            elapsed = now_mono - session_start_mono
+            pearls  = pearls_for_duration(elapsed)
             db_save_session(conn, session_start, elapsed, pearls)
-            total         = db_get_total(conn)
-            in_session    = False
-            print(f"Session ended: {elapsed:.0f}s, {pearls:.2f} pearls, total {total:.2f}")
+            total   = db_get_total(conn)
+            in_session = False
+            print(f"Session ended: {elapsed:.0f}s, {pearls} pearls, total {total}")
             display_summary(pearls, total)
-            time.sleep(3)
+            time.sleep(4)
 
         elif in_session:
-            # ── Session in progress: update display every second ──
             elapsed = now_mono - session_start_mono
-            if now_mono - last_display >= 1.0:
+            elapsed_min = elapsed / 60.0
+
+            # Check for milestone messages
+            for ms_min, ms_msg in MILESTONE_MESSAGES:
+                if elapsed_min >= ms_min and last_milestone_min < ms_min:
+                    last_milestone_min = ms_min
+                    milestone_show_until = now_mono + 3.0
+                    display_milestone(ms_msg, pearls_for_duration(elapsed))
+                    break
+
+            # Update display every second, unless showing milestone
+            if now_mono - last_display >= 1.0 and now_mono >= milestone_show_until:
                 pearls = pearls_for_duration(elapsed)
                 total  = db_get_total(conn)
                 display_session(elapsed, pearls, total)
