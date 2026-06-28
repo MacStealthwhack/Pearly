@@ -100,8 +100,8 @@ def lcd_create_chars():
     # Pearl icon: small sphere with shine arc in top-left
     # Each row is a 5-bit pattern (bits 4-0 = columns left-right)
     pearl = [
-        0b00110,   # ..XX.   shine arc
-        0b01001,   # .X..X
+        0b00000,   # .....
+        0b00000,   # .....
         0b01110,   # .XXX.   top of sphere
         0b11111,   # XXXXX
         0b11111,   # XXXXX
