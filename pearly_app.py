@@ -36,17 +36,16 @@ E_DELAY   = 0.0005
 CHAR_PEARL = 0   # Pearl icon slot
 
 # ── Pearl Rate Milestones ──────────────────────────────────────────────────
-# (minimum elapsed minutes, rate in pearls/min)
+# (minimum elapsed minutes, rate in pearls/hour)
 MILESTONES = [
-    (0,   5),
-    (15,  8),
-    (30, 10),
+    (0,  5),
+    (30, 8),
+    (60, 10),
 ]
 
 MILESTONE_MESSAGES = [
-    (15, "15 min! Rate up!"),
-    (30, "30 min! Max rate!"),
-    (60, "1 hour! Amazing!"),
+    (30, "30 min! Rate up!"),
+    (60, "60 min! Max rate!"),
     (120,"2 hours! Wow!   "),
 ]
 
@@ -59,7 +58,7 @@ IDLE_SECRET_MESSAGES = [
 IDLE_SECRET_CHANCE = 100   # 1 in N chance of showing a secret message
 
 # ── Periodic DB Checkpoint ─────────────────────────────────────────────────
-DB_CHECKPOINT_INTERVAL = 300   # seconds (5 minutes)
+DB_CHECKPOINT_INTERVAL = 120   # seconds (2 minutes)
 
 # ── Database ───────────────────────────────────────────────────────────────
 DB_PATH = "/home/admin/pearly.db"
@@ -289,7 +288,7 @@ def db_checkpoint(conn: sqlite3.Connection, started_at: datetime,
 # ══════════════════════════════════════════════════════════════════════════
 
 def current_rate(elapsed_s: float) -> int:
-    """Return current pearls/min based on milestone thresholds."""
+    """Return current pearls/hour based on milestone thresholds."""
     elapsed_min = elapsed_s / 60.0
     rate = MILESTONES[0][1]
     for min_elapsed, milestone_rate in MILESTONES:
@@ -304,17 +303,17 @@ def pearls_for_duration(duration_s: float) -> int:
     Returns a whole number.
     """
     total = 0.0
-    duration_min = duration_s / 60.0
+    duration_hr = duration_s / 3600.0
 
-    # Build milestone breakpoints in minutes
-    breakpoints = [(m, r) for m, r in MILESTONES]
+    # Build milestone breakpoints in hours
+    breakpoints = [(m / 60.0, r) for m, r in MILESTONES]
 
-    for i, (start_min, rate) in enumerate(breakpoints):
-        end_min = breakpoints[i + 1][0] if i + 1 < len(breakpoints) else duration_min
-        end_min = min(end_min, duration_min)
-        if start_min >= duration_min:
+    for i, (start_hr, rate) in enumerate(breakpoints):
+        end_hr = breakpoints[i + 1][0] if i + 1 < len(breakpoints) else duration_hr
+        end_hr = min(end_hr, duration_hr)
+        if start_hr >= duration_hr:
             break
-        segment = end_min - start_min
+        segment = end_hr - start_hr
         total += segment * rate
 
     return int(total)
@@ -364,9 +363,9 @@ def display_session(elapsed_s: float, session_pearls: int, total: int):
 
     if next_ms is not None:
         remaining = int(next_ms - elapsed_s / 60.0) + 1
-        line2 = f"Rate:{rate}\x00/m +{remaining}m"
+        line2 = f"Rate:{rate}\x00/h +{remaining}m"
     else:
-        line2 = f"Rate:{rate}\x00/m MAX!"
+        line2 = f"Rate:{rate}\x00/h MAX!"
 
     lcd_write(line1, line2)
 
@@ -374,7 +373,7 @@ def display_session(elapsed_s: float, session_pearls: int, total: int):
 def display_milestone(message: str, session_pearls: int):
     lcd_write(
         message,
-        f"+{session_pearls}\x00 this session"
+        f"+{session_pearls}\x00 so far"
     )
 
 
