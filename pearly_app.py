@@ -153,37 +153,50 @@ def _lcd_write_line(text: str):
 
 def lcd_splash():
     """
-    Animate 'Welcome to' sliding in from left, 'Pearly' from right.
-    Both lines slide to their centered positions and stop there.
+    Animate 'Welcome to' sliding in from left (starts fully off-screen),
+    'Pearly' sliding in from right (starts fully off-screen).
+    Both stop at their centered positions.
     """
     top    = "Welcome to"
     bottom = "Pearly"
-
-    # Final centered positions (left-pad index for each string)
-    top_final    = (LCD_WIDTH - len(top))    // 2
-    bottom_final = (LCD_WIDTH - len(bottom)) // 2
-
-    # Total steps = max distance either string has to travel
-    steps = max(top_final, LCD_WIDTH - bottom_final) + 1
-
+ 
+    top_final    = (LCD_WIDTH - len(top))    // 2  # 3
+    bottom_final = (LCD_WIDTH - len(bottom)) // 2  # 5
+ 
+    # Top travels from -len(top) to top_final
+    # Bottom travels from LCD_WIDTH to bottom_final
+    steps = max(top_final + len(top), LCD_WIDTH - bottom_final) + 1
+ 
     for i in range(steps):
-        # Top slides in from left: starts at 0, moves to top_final
-        top_offset = top_final * i // max(steps - 1, 1)
-        line1 = (" " * top_offset + top).ljust(LCD_WIDTH)[:LCD_WIDTH]
-
-        # Bottom slides in from right: starts at LCD_WIDTH, moves to bottom_final
-        bottom_start = LCD_WIDTH - (LCD_WIDTH - bottom_final) * i // max(steps - 1, 1)
-        line2 = (" " * bottom_start + bottom).ljust(LCD_WIDTH)[:LCD_WIDTH]
-
+        t = i / max(steps - 1, 1)  # 0.0 → 1.0
+ 
+        # Top: interpolate position from -len(top) to top_final
+        top_pos = int(-len(top) + (top_final + len(top)) * t)
+        if top_pos < 0:
+            # Partially off-screen left: clip leading characters
+            line1 = (top[abs(top_pos):]).ljust(LCD_WIDTH)[:LCD_WIDTH]
+        else:
+            line1 = (" " * top_pos + top).ljust(LCD_WIDTH)[:LCD_WIDTH]
+ 
+        # Bottom: interpolate position from LCD_WIDTH to bottom_final
+        bottom_pos = int(LCD_WIDTH - (LCD_WIDTH - bottom_final) * t)
+        if bottom_pos + len(bottom) > LCD_WIDTH:
+            # Partially off-screen right: clip trailing characters
+            visible = max(0, LCD_WIDTH - bottom_pos)
+            line2 = (" " * bottom_pos + bottom[:visible]).ljust(LCD_WIDTH)[:LCD_WIDTH]
+        else:
+            line2 = (" " * bottom_pos + bottom).ljust(LCD_WIDTH)[:LCD_WIDTH]
+ 
         lcd_write(line1, line2)
         time.sleep(0.06)
-
+ 
     # Ensure final frame is exactly centered
     lcd_write(
         top.center(LCD_WIDTH),
         bottom.center(LCD_WIDTH)
     )
     time.sleep(2.0)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -329,15 +342,15 @@ def fmt_duration(seconds: float) -> str:
     return f"{m:02d}m{sec:02d}s"
 
 
-def pick_idle_content(total: int):
-    """Choose idle screen content once. Returns (line1, line2)."""
+def pick_idle_content():
+    """Choose idle screen content once."""
     if random.randint(1, IDLE_SECRET_CHANCE) == 1:
-        return (random.choice(IDLE_SECRET_MESSAGES), "                ")
-    return ("Pearly is ready ", f"Total: {total}\x00")
+        return random.choice(IDLE_SECRET_MESSAGES)
+    return "Pearly is ready "
 
 
-def display_idle(line1: str, line2: str):
-    lcd_write(line1, line2)
+def display_idle(line1: str, total: int):
+    lcd_write(line1, f"Total: {total}\x00")
 
 
 def display_session(elapsed_s: float, session_pearls: int, total: int):
@@ -367,9 +380,9 @@ def display_milestone(message: str, session_pearls: int):
 
 def display_summary(session_pearls: int, total: int):
     if session_pearls == 0:
-        line1 = f"+{session_pearls}\x00 earned, oof..."
+        line1 = f"{session_pearls}\x00 earned, oof  "
     else:
-        line1 = f"+{session_pearls} \x00 earned!  "
+        line1 = f"+{session_pearls}\x00 earned!  "
     lcd_write(line1, f"Total: {total}\x00")
 
 
@@ -393,7 +406,7 @@ def main():
     last_milestone_min = -1  # track which milestones we've shown
     milestone_show_until = 0.0  # monotonic time until which to show milestone msg
     last_checkpoint    = 0.0  # monotonic time of last DB checkpoint
-    idle_content       = None  # (line1, line2) chosen once per idle screen showing
+    idle_content       = pick_idle_content()  # chosen once per idle screen showing
 
     print("Pearly started.")
 
@@ -406,7 +419,7 @@ def main():
             conn.commit()
             db_save_session(conn, session_start, elapsed, pearls)
             print(f"Session saved: {elapsed:.0f}s, {pearls} pearls")
-        lcd_write("  Pearly offline", "   Goodbye!     ")
+        lcd_write(" Pearly offline ", "  Buh bye now!  ")
         time.sleep(2)
         lcd_byte(0x01, LCD_CMD)
         GPIO.cleanup()
@@ -429,7 +442,7 @@ def main():
             last_milestone_min = -1
             milestone_show_until = 0.0
             last_checkpoint    = now_mono
-            idle_content       = None
+            idle_content       = pick_idle_content()
             print(f"Session started at {session_start.isoformat()}")
 
         elif not active and in_session:
@@ -474,9 +487,7 @@ def main():
             # ── Idle ──
             if now_mono - last_display >= 5.0:
                 total = db_get_total(conn)
-                # Roll new content each time the 5s timer fires (once per showing)
-                idle_content = pick_idle_content(total)
-                display_idle(*idle_content)
+                display_idle(idle_content, total)
                 last_display = now_mono
 
         time.sleep(0.1)
