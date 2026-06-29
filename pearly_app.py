@@ -8,6 +8,7 @@ import time
 import sqlite3
 import signal
 import sys
+import random
 from datetime import datetime
 import RPi.GPIO as GPIO
 
@@ -49,6 +50,17 @@ MILESTONE_MESSAGES = [
     (120,"2 hours! Wow!   "),
 ]
 
+# ── Idle Easter Eggs ───────────────────────────────────────────────────────
+IDLE_SECRET_MESSAGES = [
+    "Lego Lego Lego! ",
+    "I see your texts",
+    "Pearly is hungry",
+]
+IDLE_SECRET_CHANCE = 100   # 1 in N chance of showing a secret message
+
+# ── Periodic DB Checkpoint ─────────────────────────────────────────────────
+DB_CHECKPOINT_INTERVAL = 300   # seconds (5 minutes)
+
 # ── Database ───────────────────────────────────────────────────────────────
 DB_PATH = "/home/admin/pearly.db"
 
@@ -58,6 +70,7 @@ DB_PATH = "/home/admin/pearly.db"
 # ══════════════════════════════════════════════════════════════════════════
 
 def lcd_init():
+    GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
     for pin in (LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7):
         GPIO.setup(pin, GPIO.OUT)
@@ -139,36 +152,33 @@ def _lcd_write_line(text: str):
 # ══════════════════════════════════════════════════════════════════════════
 
 def lcd_splash():
-    """Animate 'Welcome to' sliding in from left, 'Pearly' from right."""
+    """
+    Animate 'Welcome to' sliding in from left, 'Pearly' from right.
+    Both lines slide to their centered positions and stop there.
+    """
     top    = "Welcome to"
     bottom = "Pearly"
 
-    # Slide top line in from left, bottom from right simultaneously
-    steps = LCD_WIDTH + max(len(top), len(bottom))
-    for i in range(1, steps + 1):
-        # Top: slides in from left
-        top_pos = i - len(top)
-        if top_pos < 0:
-            top_slice = top[abs(top_pos):]
-            line1 = top_slice.ljust(LCD_WIDTH)
-        else:
-            line1 = (" " * top_pos + top).ljust(LCD_WIDTH)
+    # Final centered positions (left-pad index for each string)
+    top_final    = (LCD_WIDTH - len(top))    // 2
+    bottom_final = (LCD_WIDTH - len(bottom)) // 2
 
-        # Bottom: slides in from right
-        right_offset = LCD_WIDTH - i
-        if right_offset > 0:
-            line2 = (" " * right_offset + bottom)[:LCD_WIDTH]
-        else:
-            line2 = (bottom[abs(right_offset):]).ljust(LCD_WIDTH)
+    # Total steps = max distance either string has to travel
+    steps = max(top_final, LCD_WIDTH - bottom_final) + 1
 
-        lcd_write(line1[:LCD_WIDTH], line2[:LCD_WIDTH])
-        time.sleep(0.05)
+    for i in range(steps):
+        # Top slides in from left: starts at 0, moves to top_final
+        top_offset = top_final * i // max(steps - 1, 1)
+        line1 = (" " * top_offset + top).ljust(LCD_WIDTH)[:LCD_WIDTH]
 
-        # Stop sliding once both are fully visible and centered
-        if i >= LCD_WIDTH:
-            break
+        # Bottom slides in from right: starts at LCD_WIDTH, moves to bottom_final
+        bottom_start = LCD_WIDTH - (LCD_WIDTH - bottom_final) * i // max(steps - 1, 1)
+        line2 = (" " * bottom_start + bottom).ljust(LCD_WIDTH)[:LCD_WIDTH]
 
-    # Hold final centered display
+        lcd_write(line1, line2)
+        time.sleep(0.06)
+
+    # Ensure final frame is exactly centered
     lcd_write(
         top.center(LCD_WIDTH),
         bottom.center(LCD_WIDTH)
@@ -242,6 +252,25 @@ def db_save_session(conn: sqlite3.Connection, started_at: datetime,
     conn.commit()
 
 
+def db_checkpoint(conn: sqlite3.Connection, started_at: datetime,
+                  duration_s: float, pearls: int):
+    """
+    Upsert a running session record so progress is preserved on power loss.
+    Uses a fixed id of -1 to distinguish from completed sessions.
+    On session end, db_save_session writes the real record and this is deleted.
+    """
+    conn.execute("""
+        INSERT INTO sessions (id, started_at, ended_at, duration_s, pearls)
+        VALUES (-1, ?, 'IN PROGRESS', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            ended_at   = 'IN PROGRESS',
+            duration_s = excluded.duration_s,
+            pearls     = excluded.pearls
+    """, (started_at.isoformat(), duration_s, pearls))
+    conn.commit()
+    print(f"Checkpoint saved: {duration_s:.0f}s, {pearls} pearls")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Pearl Rate Calculation
 # ══════════════════════════════════════════════════════════════════════════
@@ -300,13 +329,15 @@ def fmt_duration(seconds: float) -> str:
     return f"{m:02d}m{sec:02d}s"
 
 
-def display_idle(total: int):
-    # Line 1: "Pearly is ready"
-    # Line 2: total pearls with icon
-    lcd_write(
-        "Pearly is ready ",
-        f"Total: {total}\x00"
-    )
+def pick_idle_content(total: int):
+    """Choose idle screen content once. Returns (line1, line2)."""
+    if random.randint(1, IDLE_SECRET_CHANCE) == 1:
+        return (random.choice(IDLE_SECRET_MESSAGES), "                ")
+    return ("Pearly is ready ", f"Total: {total}\x00")
+
+
+def display_idle(line1: str, line2: str):
+    lcd_write(line1, line2)
 
 
 def display_session(elapsed_s: float, session_pearls: int, total: int):
@@ -335,10 +366,11 @@ def display_milestone(message: str, session_pearls: int):
 
 
 def display_summary(session_pearls: int, total: int):
-    lcd_write(
-        f"+{session_pearls} \x00 earned! ",
-        f"Total: {total}\x00"
-    )
+    if session_pearls == 0:
+        line1 = f"+{session_pearls}\x00 earned, oof..."
+    else:
+        line1 = f"+{session_pearls} \x00 earned!  "
+    lcd_write(line1, f"Total: {total}\x00")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -360,6 +392,8 @@ def main():
     last_display       = 0.0
     last_milestone_min = -1  # track which milestones we've shown
     milestone_show_until = 0.0  # monotonic time until which to show milestone msg
+    last_checkpoint    = 0.0  # monotonic time of last DB checkpoint
+    idle_content       = None  # (line1, line2) chosen once per idle screen showing
 
     print("Pearly started.")
 
@@ -368,6 +402,8 @@ def main():
         if in_session and session_start:
             elapsed = time.monotonic() - session_start_mono
             pearls  = pearls_for_duration(elapsed)
+            conn.execute("DELETE FROM sessions WHERE id = -1")
+            conn.commit()
             db_save_session(conn, session_start, elapsed, pearls)
             print(f"Session saved: {elapsed:.0f}s, {pearls} pearls")
         lcd_write("  Pearly offline", "   Goodbye!     ")
@@ -392,12 +428,17 @@ def main():
             last_display       = 0.0
             last_milestone_min = -1
             milestone_show_until = 0.0
+            last_checkpoint    = now_mono
+            idle_content       = None
             print(f"Session started at {session_start.isoformat()}")
 
         elif not active and in_session:
             # ── Session end ──
             elapsed = now_mono - session_start_mono
             pearls  = pearls_for_duration(elapsed)
+            # Remove checkpoint record before writing final session
+            conn.execute("DELETE FROM sessions WHERE id = -1")
+            conn.commit()
             db_save_session(conn, session_start, elapsed, pearls)
             total   = db_get_total(conn)
             in_session = False
@@ -408,6 +449,11 @@ def main():
         elif in_session:
             elapsed = now_mono - session_start_mono
             elapsed_min = elapsed / 60.0
+
+            # Periodic checkpoint every 5 minutes
+            if now_mono - last_checkpoint >= DB_CHECKPOINT_INTERVAL:
+                db_checkpoint(conn, session_start, elapsed, pearls_for_duration(elapsed))
+                last_checkpoint = now_mono
 
             # Check for milestone messages
             for ms_min, ms_msg in MILESTONE_MESSAGES:
@@ -428,7 +474,9 @@ def main():
             # ── Idle ──
             if now_mono - last_display >= 5.0:
                 total = db_get_total(conn)
-                display_idle(total)
+                # Roll new content each time the 5s timer fires (once per showing)
+                idle_content = pick_idle_content(total)
+                display_idle(*idle_content)
                 last_display = now_mono
 
         time.sleep(0.1)
