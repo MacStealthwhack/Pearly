@@ -189,6 +189,8 @@ Progress is checkpointed to the database every 5 minutes during a session so pow
 ssh admin@192.168.0.56
 ```
 
+> If SSH or ping fails even though the Pi is powered and on your Wi-Fi, try restarting your router. A router reset can clear stale ARP/cache state and restore connectivity.
+
 **Push updated app file:**
 ```powershell
 scp .\pearly_app.py admin@192.168.0.56:~/

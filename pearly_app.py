@@ -36,26 +36,39 @@ E_DELAY   = 0.0005
 CHAR_PEARL = 0   # Pearl icon slot
 
 # ── Pearl Rate Milestones ──────────────────────────────────────────────────
-# (minimum elapsed minutes, rate in pearls/hour)
+# (minimum elapsed minutes, rate in pearls/hour, display string)
 MILESTONES = [
-    (0,  5),
-    (30, 8),
-    (60, 10),
+    (0,   6,  "1\x00/10m"),
+    (30,  10, "1\x00/6m "),
+    (60,  12, "1\x00/5m "),
+    (90,  15, "1\x00/4m "),
+    (120, 20, "1\x00/3m "),
 ]
 
 MILESTONE_MESSAGES = [
-    (30, "30 min! Rate up!"),
-    (60, "60 min! Max rate!"),
-    (120,"2 hours! Wow!   "),
+    (30,  "30 min, rate up!"),
+    (60,  "1 hour, rate up!"),
+    (90,  "90 min, rate up!"),
+    (120, "2 hours, turbo! "),
 ]
 
 # ── Idle Easter Eggs ───────────────────────────────────────────────────────
 IDLE_SECRET_MESSAGES = [
     "Lego Lego Lego! ",
     "I see your texts",
-    "Pearly is hungry",
+    "Pearly is HUNGRY",
+    "Hey there, cutie",
+    "Beep bop boop   ",
+    "I dream of Lego ",
+    "I know wut u did",
+    "Shredder mode ON",
+    "Brick by brick  ",
+    "Ahsoka approves ",
+    "Shiny o so shiny",
+    "PRECIOUSSSSS... ",
+    "Messi is proud  "
 ]
-IDLE_SECRET_CHANCE = 100   # 1 in N chance of showing a secret message
+IDLE_SECRET_CHANCE = 10   # 1 in N chance of showing a secret message
 
 # ── Periodic DB Checkpoint ─────────────────────────────────────────────────
 DB_CHECKPOINT_INTERVAL = 120   # seconds (2 minutes)
@@ -109,8 +122,6 @@ def lcd_toggle_enable():
 
 
 def lcd_create_chars():
-    # Pearl icon: small sphere with shine arc in top-left
-    # Each row is a 5-bit pattern (bits 4-0 = columns left-right)
     pearl = [
         0b00000,   # .....
         0b00000,   # .....
@@ -121,11 +132,9 @@ def lcd_create_chars():
         0b01110,   # .XXX.   bottom
         0b00000,   # .....
     ]
-    # Write to CGRAM slot 0
     lcd_byte(0x40 | (CHAR_PEARL << 3), LCD_CMD)
     for row in pearl:
         lcd_byte(row, LCD_CHR)
-    # Return to DDRAM
     lcd_byte(LCD_LINE1, LCD_CMD)
 
 
@@ -158,44 +167,41 @@ def lcd_splash():
     """
     top    = "Welcome to"
     bottom = "Pearly"
- 
+
     top_final    = (LCD_WIDTH - len(top))    // 2  # 3
     bottom_final = (LCD_WIDTH - len(bottom)) // 2  # 5
- 
+
     # Top travels from -len(top) to top_final
     # Bottom travels from LCD_WIDTH to bottom_final
     steps = max(top_final + len(top), LCD_WIDTH - bottom_final) + 1
- 
+
     for i in range(steps):
         t = i / max(steps - 1, 1)  # 0.0 → 1.0
- 
+
         # Top: interpolate position from -len(top) to top_final
         top_pos = int(-len(top) + (top_final + len(top)) * t)
         if top_pos < 0:
-            # Partially off-screen left: clip leading characters
             line1 = (top[abs(top_pos):]).ljust(LCD_WIDTH)[:LCD_WIDTH]
         else:
             line1 = (" " * top_pos + top).ljust(LCD_WIDTH)[:LCD_WIDTH]
- 
+
         # Bottom: interpolate position from LCD_WIDTH to bottom_final
         bottom_pos = int(LCD_WIDTH - (LCD_WIDTH - bottom_final) * t)
         if bottom_pos + len(bottom) > LCD_WIDTH:
-            # Partially off-screen right: clip trailing characters
             visible = max(0, LCD_WIDTH - bottom_pos)
             line2 = (" " * bottom_pos + bottom[:visible]).ljust(LCD_WIDTH)[:LCD_WIDTH]
         else:
             line2 = (" " * bottom_pos + bottom).ljust(LCD_WIDTH)[:LCD_WIDTH]
- 
+
         lcd_write(line1, line2)
         time.sleep(0.06)
- 
+
     # Ensure final frame is exactly centered
     lcd_write(
         top.center(LCD_WIDTH),
         bottom.center(LCD_WIDTH)
     )
     time.sleep(2.0)
-
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -291,10 +297,20 @@ def current_rate(elapsed_s: float) -> int:
     """Return current pearls/hour based on milestone thresholds."""
     elapsed_min = elapsed_s / 60.0
     rate = MILESTONES[0][1]
-    for min_elapsed, milestone_rate in MILESTONES:
+    for min_elapsed, milestone_rate, _ in MILESTONES:
         if elapsed_min >= min_elapsed:
             rate = milestone_rate
     return rate
+
+
+def current_rate_display(elapsed_s: float) -> str:
+    """Return the display string for the current rate."""
+    elapsed_min = elapsed_s / 60.0
+    display = MILESTONES[0][2]
+    for min_elapsed, _, milestone_display in MILESTONES:
+        if elapsed_min >= min_elapsed:
+            display = milestone_display
+    return display
 
 
 def pearls_for_duration(duration_s: float) -> int:
@@ -306,7 +322,7 @@ def pearls_for_duration(duration_s: float) -> int:
     duration_hr = duration_s / 3600.0
 
     # Build milestone breakpoints in hours
-    breakpoints = [(m / 60.0, r) for m, r in MILESTONES]
+    breakpoints = [(m / 60.0, r) for m, r, _ in MILESTONES]
 
     for i, (start_hr, rate) in enumerate(breakpoints):
         end_hr = breakpoints[i + 1][0] if i + 1 < len(breakpoints) else duration_hr
@@ -322,7 +338,7 @@ def pearls_for_duration(duration_s: float) -> int:
 def next_milestone_min(elapsed_s: float):
     """Return the next milestone in minutes, or None if past all milestones."""
     elapsed_min = elapsed_s / 60.0
-    for min_elapsed, _ in MILESTONES:
+    for min_elapsed, _, _d in MILESTONES:
         if elapsed_min < min_elapsed:
             return min_elapsed
     return None
@@ -353,19 +369,17 @@ def display_idle(line1: str, total: int):
 
 
 def display_session(elapsed_s: float, session_pearls: int, total: int):
-    # Line 1: elapsed time + session pearls with icon
-    # Line 2: rate with icon + next milestone countdown
-    rate = current_rate(elapsed_s)
     next_ms = next_milestone_min(elapsed_s)
+    rate_str = current_rate_display(elapsed_s)
 
     time_str = fmt_duration(elapsed_s)
     line1 = f"{time_str} +{session_pearls}\x00"
 
     if next_ms is not None:
         remaining = int(next_ms - elapsed_s / 60.0) + 1
-        line2 = f"Rate:{rate}\x00/h +{remaining}m"
+        line2 = f"{rate_str} +{remaining}m"
     else:
-        line2 = f"Rate:{rate}\x00/h MAX!"
+        line2 = f"{rate_str} MAX!"
 
     lcd_write(line1, line2)
 
@@ -402,10 +416,10 @@ def main():
     session_start      = None
     session_start_mono = 0.0
     last_display       = 0.0
-    last_milestone_min = -1  # track which milestones we've shown
-    milestone_show_until = 0.0  # monotonic time until which to show milestone msg
-    last_checkpoint    = 0.0  # monotonic time of last DB checkpoint
-    idle_content       = pick_idle_content()  # chosen once per idle screen showing
+    last_milestone_min = -1
+    milestone_show_until = 0.0
+    last_checkpoint    = 0.0
+    idle_content       = pick_idle_content()
 
     print("Pearly started.")
 
@@ -448,7 +462,6 @@ def main():
             # ── Session end ──
             elapsed = now_mono - session_start_mono
             pearls  = pearls_for_duration(elapsed)
-            # Remove checkpoint record before writing final session
             conn.execute("DELETE FROM sessions WHERE id = -1")
             conn.commit()
             db_save_session(conn, session_start, elapsed, pearls)
@@ -462,7 +475,7 @@ def main():
             elapsed = now_mono - session_start_mono
             elapsed_min = elapsed / 60.0
 
-            # Periodic checkpoint every 5 minutes
+            # Periodic checkpoint every 2 minutes
             if now_mono - last_checkpoint >= DB_CHECKPOINT_INTERVAL:
                 db_checkpoint(conn, session_start, elapsed, pearls_for_duration(elapsed))
                 last_checkpoint = now_mono
